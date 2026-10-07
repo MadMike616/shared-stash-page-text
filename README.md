@@ -1,6 +1,6 @@
 # Shared Stash Page Text
 
-A D2RLoader ABI 4 plugin that places an editable note above the Shared stash page indicator. `page_count` supports modded Shared stashes with up to 1,000 pages. The note hides when another stash tab is selected.
+A D2RLoader ABI 4 plugin that places an editable note above the Shared stash page indicator. `page_count` supports modded Shared stashes with up to 1,000 pages.
 
 Click the note itself to focus it and type. Enter saves and leaves the note visible; clicking outside saves and returns keyboard focus to the game. The visible field is a top-level native overlay that contains the edit control, so its displayed rectangle and hit area share the same window. A host-thread keyboard hook consumes each key before D2R's UI hotkeys process it. Text is written to TOML as it changes. Each page has its own `text` and `color` in `d2rloader/config/shared-stash-page-text.toml`.
 
@@ -8,7 +8,7 @@ The plugin also records `current_page` and `shared_tab_selected` (You shouldn't 
 
 The position is configurable in that TOML file with `window_x`, `window_y`, `window_width`, `window_height`, `anchor_x`, and `anchor_y`. `anchor_x` and `anchor_y` are normalized screen positions from 0 to 1; x/y are offsets from that anchor in D2R UI coordinates. Text is centered horizontally and vertically in the field. The `font` setting defaults to `exocetblizzardot-medium`; `font_size` defaults to `23` D2R UI coordinates and accepts values from `8` to `96`, scaling with the game window. The plugin first searches the active mod's `data/hd/ui/fonts` folder, including D2R `fontFace` aliases such as `Exocet`, and privately loads a matching `.otf` or `.ttf` into the loader process. If the asset is missing, it uses the selected Windows font family instead. Restart D2RLoader after changing the layout or font values.
 
-Set `page_count` to match the Shared stash's actual number of pages. Valid values are 1–1,000; add matching `[pages.N]` sections for the notes you want.
+Set `page_count` to match the Shared stash's actual number of pages. Valid values are 5–1,000; add matching `[pages.N]` sections for the notes you want.
 
 If `page_count` is lower than the game's actual number of Shared pages, the plugin still follows the game page, but hides the note window when the current page exceeds the configured count. When the plugin next saves the TOML, it writes only `[pages.1]` through `[pages.N]`, so note sections above the configured count can be removed. Back up the TOML before lowering `page_count` if it contains notes on higher pages.
 
