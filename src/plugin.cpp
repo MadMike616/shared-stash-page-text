@@ -15,12 +15,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
-#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -39,26 +37,18 @@ constexpr char PanelLocalId[] = "Notes";
 constexpr char LayoutResourcePath[] =
     "data/global/ui/layouts/shared-stash-page-text/Noteshd.json";
 
-enum class PendingUiActionKind {
-    SelectTab,
-    SharedStashLeft,
-    SharedStashRight,
-    Open,
-    Close,
-    GameJoined,
-};
+constexpr std::uintptr_t FindStockPanelRva = 0x846190;
+constexpr std::uintptr_t GetBankTabRva = 0x23AF50;
+constexpr std::uintptr_t GetPreviousSeasonRva = 0x23B910;
+constexpr int BankPanelId = 24;
+constexpr std::size_t WidgetVisibleOffset = 0x51;
+constexpr std::size_t SharedPageOffset = 0x168;
+constexpr std::size_t PreviousSeasonPageOffset = 0x170;
 
-struct PendingUiAction {
-    PendingUiActionKind kind{};
-    std::size_t tabIndex{};
-    std::size_t pageSteps{1};
-    bool hasTabIndex{};
-    bool wrapsPages{};
-};
-
-struct PendingWheelInput {
-    int direction{};
-    ULONGLONG receivedAt{};
+struct StashState {
+    bool open{};
+    bool shared{};
+    std::size_t page{};
 };
 
 #include "shared_stash_default_config.hpp"
@@ -85,7 +75,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = PluginId,
     .name = "Shared Stash Page Text",
-    .version = "0.1.22",
+    .version = "0.1.23",
     .author = "MadMike",
     .description = "Editable colored notes for Shared stash pages.",
     .flags = D2RL::PluginFlags::Client,
@@ -110,11 +100,7 @@ std::size_t CurrentPage{1};
 std::size_t EditorPage{1};
 bool SharedTabSelected{};
 bool StashOpen{};
-std::mutex PendingUiActionsMutex;
-std::deque<PendingUiAction> PendingUiActions;
-std::mutex PendingWheelInputsMutex;
-std::deque<PendingWheelInput> PendingWheelInputs;
-int WheelDeltaRemainder{};
+std::atomic_bool NewGamePending{};
 std::atomic_bool SyncPending{};
 std::atomic_bool Active{};
 
@@ -138,14 +124,7 @@ UINT FocusReleaseKey{};
 constexpr int VirtualLayoutHeight = 1801;
 constexpr UINT_PTR EditorTimerId = 0xD2A1;
 constexpr UINT_PTR EditorControlId = 0xD2A2;
-constexpr UINT_PTR WheelTimerId = 0xD2A3;
-constexpr UINT WheelFallbackDelayMs = 180;
-
-auto QueuePendingUiAction(PendingUiAction action) noexcept -> bool;
 void ScheduleSync() noexcept;
-void RecordWheelInput(int delta) noexcept;
-auto ConsumePendingWheelInput() noexcept -> bool;
-void FlushPendingWheelInputs() noexcept;
 void LoadConfiguredFont() noexcept;
 void UnloadConfiguredFont() noexcept;
 
@@ -796,11 +775,8 @@ LRESULT CALLBACK NativeEditorWindowProc(HWND window, UINT message, WPARAM wParam
         return 0;
     }
     if (message == WM_KILLFOCUS) SavePageInput();
-    if (message == WM_TIMER && wParam == WheelTimerId) {
-        FlushPendingWheelInputs();
-        return 0;
-    }
     if (message == WM_TIMER && wParam == EditorTimerId) {
+        ScheduleSync();
         SavePageInput();
         PositionNativeEditor();
         const HWND foreground = GetForegroundWindow();
@@ -808,7 +784,8 @@ LRESULT CALLBACK NativeEditorWindowProc(HWND window, UINT message, WPARAM wParam
             || foreground == OverlayWindow
             || (foreground != nullptr && IsChild(HostWindow, foreground));
         const bool shouldBeVisible = Active.load(std::memory_order_acquire)
-            && StashOpen && SharedTabSelected && hostIsForeground;
+            && StashOpen && SharedTabSelected && hostIsForeground
+            && CurrentPage >= 1 && CurrentPage <= ConfiguredPageCount;
         if (shouldBeVisible && !IsWindowVisible(OverlayWindow)) {
             SetNativeEditorVisible(true);
         } else if (!shouldBeVisible && IsWindowVisible(OverlayWindow)) {
@@ -829,17 +806,6 @@ LRESULT CALLBACK NativeEditorWindowProc(HWND window, UINT message, WPARAM wParam
 
 LRESULT CALLBACK NativeKeyboardHook(int code, WPARAM wParam, LPARAM lParam) noexcept {
     const bool keyUp = (static_cast<ULONG_PTR>(lParam) & (ULONG_PTR{1} << 31)) != 0;
-    if (code == HC_ACTION && !keyUp && wParam == VK_ESCAPE
-            && Active.load(std::memory_order_acquire) && StashOpen && SharedTabSelected
-            && OverlayWindow != nullptr && IsWindowVisible(OverlayWindow)
-            && GetFocus() != EditorWindow) {
-        // Escape closes the game's stash, but some layouts do not publish a
-        // BankPanelMessage:Close for that path. Mirror the close locally so
-        // the overlay is saved and hidden with the stash.
-        if (QueuePendingUiAction({.kind = PendingUiActionKind::Close})) {
-            ScheduleSync();
-        }
-    }
     if (code == HC_ACTION && EditorWindow != nullptr && IsWindowVisible(EditorWindow)
             && GetFocus() == EditorWindow) {
         const bool altContext = (static_cast<ULONG_PTR>(lParam) & (ULONG_PTR{1} << 29)) != 0
@@ -897,107 +863,10 @@ LRESULT CALLBACK HostWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM
         : DefWindowProcW(window, message, wParam, lParam);
 }
 
-void RecordWheelInput(int delta) noexcept {
-    if (!Active.load(std::memory_order_acquire) || !StashOpen || !SharedTabSelected
-            || delta == 0) {
-        const std::lock_guard<std::mutex> lock(PendingWheelInputsMutex);
-        WheelDeltaRemainder = 0;
-        return;
-    }
-    RECT overlayRect{};
-    if (OverlayWindow != nullptr && GetWindowRect(OverlayWindow, &overlayRect)) {
-        POINT cursor{};
-        (void)GetCursorPos(&cursor);
-        if (PtInRect(&overlayRect, cursor)) {
-            const std::lock_guard<std::mutex> lock(PendingWheelInputsMutex);
-            WheelDeltaRemainder = 0;
-            return;
-        }
-    }
-
-    int steps{};
-    try {
-        const std::lock_guard<std::mutex> lock(PendingWheelInputsMutex);
-        const int accumulated = WheelDeltaRemainder + delta;
-        steps = accumulated / WHEEL_DELTA;
-        WheelDeltaRemainder = accumulated % WHEEL_DELTA;
-        if (steps == 0) return;
-        const int direction = steps > 0 ? 1 : -1;
-        for (int step = 0; step < std::abs(steps); ++step) {
-            PendingWheelInputs.push_back({direction, GetTickCount64()});
-        }
-    } catch (...) {
-        if (Context != nullptr) Context->LogError("SharedStashPageText: could not buffer a mouse-wheel page change.");
-        return;
-    }
-    if (EditorWindow != nullptr) (void)SetTimer(EditorWindow, WheelTimerId, WheelFallbackDelayMs, nullptr);
-    D2RL::LogInfoF(Context, "SharedStashPageText: buffered wheel page steps=%d direction=%s",
-        std::abs(steps), steps > 0 ? "right" : "left");
-}
-
-auto ConsumePendingWheelInput() noexcept -> bool {
-    const std::lock_guard<std::mutex> lock(PendingWheelInputsMutex);
-    if (PendingWheelInputs.empty()) return false;
-    PendingWheelInputs.pop_front();
-    return true;
-}
-
-void FlushPendingWheelInputs() noexcept {
-    std::deque<PendingWheelInput> expired;
-    const ULONGLONG now = GetTickCount64();
-    ULONGLONG nextDelay{};
-    {
-        const std::lock_guard<std::mutex> lock(PendingWheelInputsMutex);
-        while (!PendingWheelInputs.empty()) {
-            const PendingWheelInput& input = PendingWheelInputs.front();
-            const ULONGLONG elapsed = now - input.receivedAt;
-            if (elapsed < WheelFallbackDelayMs) {
-                nextDelay = WheelFallbackDelayMs - elapsed;
-                break;
-            }
-            expired.push_back(input);
-            PendingWheelInputs.pop_front();
-        }
-    }
-    if (EditorWindow != nullptr) {
-        if (nextDelay != 0) (void)SetTimer(EditorWindow, WheelTimerId,
-            static_cast<UINT>(nextDelay), nullptr);
-        else (void)KillTimer(EditorWindow, WheelTimerId);
-    }
-
-    bool queued{};
-    for (const PendingWheelInput& input : expired) {
-        if (!Active.load(std::memory_order_acquire) || !StashOpen || !SharedTabSelected) continue;
-        const PendingUiAction action{
-            .kind = input.direction > 0
-                ? PendingUiActionKind::SharedStashRight : PendingUiActionKind::SharedStashLeft,
-            .wrapsPages = true,
-        };
-        if (QueuePendingUiAction(action)) {
-            queued = true;
-            D2RL::LogInfoF(Context, "SharedStashPageText: applying unmatched wheel direction=%s",
-                input.direction > 0 ? "right" : "left");
-        }
-    }
-    if (queued) ScheduleSync();
-}
-
-void ClearPendingWheelInputs() noexcept {
-    {
-        const std::lock_guard<std::mutex> lock(PendingWheelInputsMutex);
-        PendingWheelInputs.clear();
-        WheelDeltaRemainder = 0;
-    }
-    if (EditorWindow != nullptr) (void)KillTimer(EditorWindow, WheelTimerId);
-}
-
 LRESULT CALLBACK NativeMessageHook(int code, WPARAM wParam, LPARAM lParam) noexcept {
     if (code >= 0 && wParam == PM_REMOVE && EditorWindow != nullptr
             && IsWindowVisible(EditorWindow) && lParam != 0) {
         auto* message = reinterpret_cast<MSG*>(lParam);
-        if (message->message == WM_MOUSEWHEEL) {
-            RecordWheelInput(static_cast<short>(HIWORD(message->wParam)));
-        }
         const bool mouseDown = message->message == WM_LBUTTONDOWN
             || message->message == WM_LBUTTONDBLCLK
             || message->message == WM_RBUTTONDOWN || message->message == WM_RBUTTONDBLCLK
@@ -1176,7 +1045,6 @@ void DestroyNativeEditor() noexcept {
     if (EditorWindow != nullptr && IsWindow(EditorWindow)) {
         SavePageInput();
         (void)KillTimer(EditorWindow, EditorTimerId);
-        ClearPendingWheelInputs();
         if (OverlayWindow != nullptr) (void)ShowWindow(OverlayWindow, SW_HIDE);
         if (GetFocus() == EditorWindow && HostWindow != nullptr) (void)SetFocus(HostWindow);
         if (PreviousEditorWindowProc != nullptr) {
@@ -1217,103 +1085,57 @@ void DestroyNativeEditor() noexcept {
     FocusReleaseKey = 0;
 }
 
-auto QueuePendingUiAction(PendingUiAction action) noexcept -> bool {
-    try {
-        const std::lock_guard<std::mutex> lock(PendingUiActionsMutex);
-        PendingUiActions.push_back(action);
-        return true;
-    } catch (...) {
-        if (Context != nullptr) Context->LogError("SharedStashPageText: could not queue a stash UI event.");
-        return false;
-    }
-}
+auto ReadStashState() noexcept -> StashState {
+    using FindPanelFn = const std::byte*(__fastcall*)(int);
+    using GetTabFn = std::uint8_t(__fastcall*)(const void*);
+    using GetPreviousSeasonFn = std::uint8_t(__fastcall*)(const void*);
+    const auto findPanel = reinterpret_cast<FindPanelFn>(Context->exeBase + FindStockPanelRva);
+    const auto getTab = reinterpret_cast<GetTabFn>(Context->exeBase + GetBankTabRva);
+    const auto getPreviousSeason = reinterpret_cast<GetPreviousSeasonFn>(Context->exeBase + GetPreviousSeasonRva);
 
-void ProcessPendingUiActions() noexcept {
-    std::deque<PendingUiAction> actions;
-    {
-        const std::lock_guard<std::mutex> lock(PendingUiActionsMutex);
-        actions.swap(PendingUiActions);
+    const std::byte* panel = findPanel(BankPanelId);
+    if (panel == nullptr || panel[WidgetVisibleOffset] == std::byte{}) return {};
+    StashState state{.open = true, .shared = getTab(panel) == 1};
+    if (state.shared) {
+        std::size_t zeroBasedPage{};
+        const std::size_t offset = getPreviousSeason(panel)
+            ? PreviousSeasonPageOffset : SharedPageOffset;
+        std::memcpy(&zeroBasedPage, panel + offset, sizeof(zeroBasedPage));
+        if (zeroBasedPage < MaximumPageCount) state.page = zeroBasedPage + 1;
     }
-
-    bool configChanged{};
-    for (const PendingUiAction& action : actions) {
-        switch (action.kind) {
-        case PendingUiActionKind::SelectTab:
-            if (SharedTabSelected && StashOpen) SavePageInput();
-            StashOpen = true;
-            // A generic tab event has no payload; the indexed event that
-            // follows determines whether Shared is selected.
-            if (action.hasTabIndex) {
-                SharedTabSelected = action.tabIndex == 1;
-                if (!SharedTabSelected) ClearPendingWheelInputs();
-                configChanged = true;
-            }
-            break;
-        case PendingUiActionKind::SharedStashLeft:
-            if (SharedTabSelected && StashOpen) SavePageInput();
-            StashOpen = true;
-            SharedTabSelected = true;
-            if (action.wrapsPages) {
-                const std::size_t pageSteps = action.pageSteps % ConfiguredPageCount;
-                CurrentPage = (CurrentPage - 1 + ConfiguredPageCount - pageSteps)
-                    % ConfiguredPageCount + 1;
-            } else {
-                CurrentPage = action.pageSteps >= CurrentPage - 1
-                    ? 1 : CurrentPage - action.pageSteps;
-            }
-            configChanged = true;
-            break;
-        case PendingUiActionKind::SharedStashRight:
-            if (SharedTabSelected && StashOpen) SavePageInput();
-            StashOpen = true;
-            SharedTabSelected = true;
-            if (action.wrapsPages) {
-                CurrentPage = (CurrentPage - 1 + action.pageSteps % ConfiguredPageCount)
-                    % ConfiguredPageCount + 1;
-            } else {
-                CurrentPage = action.pageSteps >= ConfiguredPageCount - CurrentPage
-                    ? ConfiguredPageCount : CurrentPage + action.pageSteps;
-            }
-            configChanged = true;
-            break;
-        case PendingUiActionKind::Open:
-            StashOpen = true;
-            break;
-        case PendingUiActionKind::Close:
-            if (SharedTabSelected && StashOpen) SavePageInput();
-            StashOpen = false;
-            ClearPendingWheelInputs();
-            configChanged = true;
-            break;
-        case PendingUiActionKind::GameJoined:
-            // Save against EditorPage before resetting the session trackers.
-            // The edit control can still hold the previous game's last page,
-            // and the next character starts on the Personal stash tab.
-            SavePageInput();
-            StashOpen = false;
-            SharedTabSelected = false;
-            CurrentPage = 1;
-            ClearPendingWheelInputs();
-            configChanged = true;
-            D2RL::LogInfoF(Context, "SharedStashPageText: new game session; page index reset to 1 and Shared tab state cleared.");
-            break;
-        }
-    }
-    if (configChanged) (void)PersistConfig();
+    return state;
 }
 
 void SyncPanelUi(const D2RL::PluginContext*, void*) noexcept {
     SyncPending.store(false, std::memory_order_release);
-    if (Context == nullptr || PanelService == nullptr || PanelHandle == D2RL::Panels::InvalidHandle) return;
-    ProcessPendingUiActions();
+    if (!Active.load(std::memory_order_acquire) || Context == nullptr
+            || PanelService == nullptr || PanelHandle == D2RL::Panels::InvalidHandle) return;
+
+    const bool newGame = NewGamePending.exchange(false, std::memory_order_acq_rel);
+    const StashState state = ReadStashState();
+    const bool pageKnown = !state.shared || state.page != 0;
+    const std::size_t page = state.shared && pageKnown
+        ? state.page : (newGame ? 1 : CurrentPage);
+    const bool stateChanged = newGame || StashOpen != state.open
+        || SharedTabSelected != state.shared || CurrentPage != page;
+    if (stateChanged) {
+        SavePageInput();
+        StashOpen = state.open;
+        SharedTabSelected = state.shared;
+        CurrentPage = page;
+        (void)PersistConfig();
+    }
+
     bool panelOpen{};
     D2RL::Panels::PanelInfo info{.structSize = D2RL::Panels::PanelInfoSize};
     const auto infoResult = PanelService->getPanelInfo(Context, PanelHandle, &info);
     if (infoResult == D2RL::Panels::Result::Success) {
         panelOpen = info.presentationState == D2RL::Panels::PresentationState::Open;
     }
-    const bool shouldOpen = Active.load(std::memory_order_acquire) && StashOpen && SharedTabSelected;
-    D2RL::LogInfoF(Context,
+    const bool shouldOpen = StashOpen && SharedTabSelected && pageKnown
+        && CurrentPage >= 1 && CurrentPage <= ConfiguredPageCount;
+    const bool presentationChanged = shouldOpen != panelOpen;
+    if (stateChanged) D2RL::LogInfoF(Context,
         "SharedStashPageText: panel sync stash=%d shared=%d page=%zu desired=%d open=%d infoResult=%u presentation=%u",
         StashOpen ? 1 : 0, SharedTabSelected ? 1 : 0, CurrentPage,
         shouldOpen ? 1 : 0, panelOpen ? 1 : 0,
@@ -1327,8 +1149,9 @@ void SyncPanelUi(const D2RL::PluginContext*, void*) noexcept {
         D2RL::LogInfoF(Context, "SharedStashPageText: closePanel result=%u", static_cast<unsigned>(result));
     }
     if (shouldOpen) {
+        const bool needsEditor = !IsWindow(EditorWindow);
         if (CreateNativeEditor()) {
-            SetNativeEditorVisible(true);
+            if (stateChanged || presentationChanged || needsEditor) SetNativeEditorVisible(true);
         } else if (panelOpen) {
             (void)PanelService->closePanel(Context, PanelHandle);
         }
@@ -1338,27 +1161,12 @@ void SyncPanelUi(const D2RL::PluginContext*, void*) noexcept {
 }
 
 void ScheduleSync() noexcept {
-    if (ThreadService == nullptr || ThreadService->runOnUiThread == nullptr
+    if (!Active.load(std::memory_order_acquire) || ThreadService == nullptr
+            || ThreadService->runOnUiThread == nullptr
             || SyncPending.exchange(true, std::memory_order_acq_rel)) return;
     if (ThreadService->runOnUiThread(Context, SyncPanelUi, nullptr) != D2RL::Threads::Result::Success) {
         SyncPending.store(false, std::memory_order_release);
     }
-}
-
-auto ParseTabIndex(std::string_view text) -> std::size_t {
-    text = Trim(text);
-    if (text == "Shared" || text == "shared" || text == "@shared") return 1;
-    if (text.empty()) return 0;
-    std::size_t index{};
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), index);
-    if (parsed.ec == std::errc{} && parsed.ptr == text.data() + text.size()) return index;
-    for (std::size_t i = 0; i < text.size(); ++i) {
-        if (!std::isdigit(static_cast<unsigned char>(text[i]))) continue;
-        std::size_t value{};
-        const auto result = std::from_chars(text.data() + i, text.data() + text.size(), value);
-        if (result.ec == std::errc{}) return value;
-    }
-    return 0;
 }
 
 auto __cdecl OnUiMessage(const D2RL::PluginContext* context,
@@ -1398,62 +1206,7 @@ auto __cdecl OnUiMessage(const D2RL::PluginContext* context,
             static_cast<unsigned long long>(event->commandHash));
     }
 
-    PendingUiAction action{};
-    if (bankPanelTarget && command == "SelectTab") {
-        // Some layouts emit a generic onSwitchTabMessage before an indexed
-        // event. Preserve that ordering in the UI-thread queue.
-        action.kind = PendingUiActionKind::SelectTab;
-        if (!text.empty()) {
-            action.hasTabIndex = true;
-            action.tabIndex = ParseTabIndex(text);
-        }
-    } else if (bankPanelTarget && command == "SharedStashLeft") {
-        action.kind = PendingUiActionKind::SharedStashLeft;
-    } else if (bankPanelTarget && command == "SharedStashRight") {
-        action.kind = PendingUiActionKind::SharedStashRight;
-    } else if (bankPanelTarget && command == "Close") {
-        action.kind = PendingUiActionKind::Close;
-    } else if (bankPanelTarget) {
-        // Any BankPanelMessage proves the stock stash panel is active. Some
-        // layouts do not send a separate Open message when restoring its tab.
-        action.kind = PendingUiActionKind::Open;
-    } else if (stashUiMessage && (command == "Open" || command == "Show"
-                || command == "OpenPanel" || command == "OpenStash" || command == "ShowPanel")) {
-        // D2R can reopen on the previously selected Shared tab without a
-        // separate SelectTab event. Keep the remembered selection in that case.
-        action.kind = PendingUiActionKind::Open;
-    } else if (stashUiMessage && (command == "Close" || command == "ClosePanel"
-                || command == "CloseStash" || command == "HidePanel")) {
-        action.kind = PendingUiActionKind::Close;
-    } else if (stashUiMessage && command == "TogglePanel") {
-        action.kind = StashOpen ? PendingUiActionKind::Close : PendingUiActionKind::Open;
-    } else {
-        return D2RL::SharedEvents::UiMessageAction::Continue;
-    }
-    if (action.kind == PendingUiActionKind::Open) {
-        D2RL::LogInfoF(Context, "SharedStashPageText: recognized stash-open UI message target=%s command=%s text=%s",
-            event->target, event->command, event->text != nullptr ? event->text : "");
-    }
-    if (action.kind == PendingUiActionKind::SharedStashLeft
-            || action.kind == PendingUiActionKind::SharedStashRight) {
-        // The game's Shift/Ctrl page-jump behavior still emits one navigation
-        // message. Capture modifiers here, before the action is deferred to the
-        // UI thread, and mirror the game's page delta in our note tracker.
-        const bool controlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-        const bool shiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-        action.pageSteps = controlDown ? 10u : (shiftDown ? 5u : 1u);
-    }
-    if ((action.kind == PendingUiActionKind::SharedStashLeft
-            || action.kind == PendingUiActionKind::SharedStashRight)
-            && ConsumePendingWheelInput()) {
-        // A matched wheel event is still a single-page move even if a modifier
-        // happens to be held while scrolling.
-        action.pageSteps = 1;
-        action.wrapsPages = true;
-        D2RL::LogInfoF(Context, "SharedStashPageText: wheel navigation matched a stash UI message.");
-    }
-    if (!QueuePendingUiAction(action)) return D2RL::SharedEvents::UiMessageAction::Continue;
-    ScheduleSync();
+    if (stashUiMessage) ScheduleSync();
     return D2RL::SharedEvents::UiMessageAction::Continue;
 }
 void __cdecl OnGameJoined(const D2RL::PluginContext* context,
@@ -1461,7 +1214,7 @@ void __cdecl OnGameJoined(const D2RL::PluginContext* context,
     if (context != Context || event == nullptr
             || event->structSize < D2RL::Lifecycle::GameplayEventRequiredSize
             || event->kind != D2RL::Lifecycle::GameplayEventKind::GameJoined) return;
-    if (!QueuePendingUiAction({.kind = PendingUiActionKind::GameJoined})) return;
+    NewGamePending.store(true, std::memory_order_release);
     ScheduleSync();
 }
 auto RegisterServices(const D2RL::PluginContext* context) -> bool {
@@ -1546,7 +1299,6 @@ auto InitializePlugin(const D2RL::PluginContext* context) -> bool {
 
 void Shutdown() noexcept {
     Active.store(false, std::memory_order_release);
-    ClearPendingWheelInputs();
     SavePageInput();
     DestroyNativeEditor();
     UnloadConfiguredFont();
@@ -1575,6 +1327,7 @@ void Shutdown() noexcept {
     SharedTabSelected = false;
     StashOpen = false;
     CurrentPage = 1;
+    NewGamePending.store(false, std::memory_order_release);
     SyncPending.store(false, std::memory_order_release);
 }
 
@@ -1606,7 +1359,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
         Context = nullptr;
         return false;
     }
-    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.22 is ready; font=%s size=%d source=%s.",
+    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.23 is ready; font=%s size=%d source=%s.",
         FontFamily.c_str(), FontSize, LoadedGameFontPath.empty() ? "Windows" : "D2R assets");
     return true;
 }
