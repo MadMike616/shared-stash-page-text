@@ -8,7 +8,6 @@ Click the note to focus it and start typing; there is no Edit button. Each page 
 
 - Press **Enter** to save and leave the note visible.
 - Click outside the note to save and return keyboard focus to the game.
-- Press **Esc** while the note is unfocused to close it with the stash.
 
 ## Configure the notes
 
