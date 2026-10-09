@@ -14,7 +14,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -75,7 +74,7 @@ constexpr D2RL::PluginInfo Info{
     .apiVersion = D2RL_PLUGIN_API_VERSION,
     .id = PluginId,
     .name = "Shared Stash Page Text",
-    .version = "0.1.23",
+    .version = "0.1.24",
     .author = "MadMike",
     .description = "Editable colored notes for Shared stash pages.",
     .flags = D2RL::PluginFlags::Client,
@@ -1340,12 +1339,6 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginI
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) noexcept -> bool {
     Shutdown();
     if (!D2RL::HasContext(context) || context->apiVersion != D2RL_PLUGIN_API_VERSION) return false;
-    if (context->buildVersion == nullptr || context->buildName == nullptr
-            || std::strcmp(context->buildVersion, "3.3.0") != 0
-            || std::strcmp(context->buildName, "93847") != 0) {
-        context->LogWarn("SharedStashPageText: this layout is only validated for D2R 3.3.93847; no panel was installed.");
-        return false;
-    }
     Context = context;
     bool initialized{};
     try {
@@ -1359,7 +1352,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
         Context = nullptr;
         return false;
     }
-    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.23 is ready; font=%s size=%d source=%s.",
+    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.24 is ready; font=%s size=%d source=%s.",
         FontFamily.c_str(), FontSize, LoadedGameFontPath.empty() ? "Windows" : "D2R assets");
     return true;
 }
