@@ -14,10 +14,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -36,13 +38,60 @@ constexpr char PanelLocalId[] = "Notes";
 constexpr char LayoutResourcePath[] =
     "data/global/ui/layouts/shared-stash-page-text/Noteshd.json";
 
+constexpr std::uintptr_t BankPanelDrawRva = 0x023AA60;
 constexpr std::uintptr_t FindStockPanelRva = 0x846190;
 constexpr std::uintptr_t GetBankTabRva = 0x23AF50;
 constexpr std::uintptr_t GetPreviousSeasonRva = 0x23B910;
+constexpr std::uintptr_t WidgetFindChildRva = 0x0855C90;
+constexpr std::uintptr_t WidgetGetSizeRva = 0x08562A0;
+constexpr std::uintptr_t WidgetGetScreenPosRva = 0x08562F0;
+constexpr std::uintptr_t InitTextStyleRva = 0x086D1B0;
+constexpr std::uintptr_t DrawStyledTextRva = 0x0902E20;
+constexpr std::uintptr_t MeasureStyledTextRva = 0x0903CD0;
+constexpr std::uintptr_t DrawFilledRectRva = 0x0657B90;
 constexpr int BankPanelId = 24;
 constexpr std::size_t WidgetVisibleOffset = 0x51;
 constexpr std::size_t SharedPageOffset = 0x168;
 constexpr std::size_t PreviousSeasonPageOffset = 0x170;
+constexpr std::size_t WidgetFontIndexOffset = 0xB0;
+
+struct NativeRect {
+    int x{};
+    int y{};
+    int width{};
+    int height{};
+};
+
+using BankPanelDrawFn = void(__fastcall*)(void*) noexcept;
+using DrawStyledTextFn = void(__fastcall*)(const char*, const NativeRect*, const void*, float) noexcept;
+
+constexpr std::uint8_t BankPanelDrawBytes[17]{
+    0x40, 0x53, 0x55, 0x56, 0x57, 0x48, 0x83, 0xEC, 0x58,
+    0x4C, 0x89, 0xB4, 0x24, 0x98, 0x00, 0x00, 0x00,
+};
+
+constexpr std::uint8_t DrawStyledTextBytes[32]{
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x70, 0x0F,
+    0x29, 0x74, 0x24, 0x60, 0x49, 0x8B, 0xF0, 0x0F, 0x28, 0xF3, 0x48, 0x8B, 0xFA, 0x48, 0x8B, 0xD9
+};
+constexpr std::uint8_t InitTextStyleBytes[16]{
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x20, 0xC7, 0x41, 0x30, 0x00, 0x00, 0x80, 0x3F, 0x33, 0xC0, 0x89
+};
+constexpr std::uint8_t MeasureStyledTextBytes[16]{
+    0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC, 0x50, 0x0F
+};
+constexpr std::uint8_t DrawFilledRectBytes[16]{
+    0x44, 0x3B, 0xC1, 0x0F, 0x8C, 0xD3, 0x02, 0x00, 0x00, 0x4C, 0x8B, 0xDC, 0x55, 0x41, 0x54, 0x41
+};
+constexpr std::uint8_t WidgetFindChildBytes[16]{
+    0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x54, 0x48, 0x83, 0xEC, 0x20, 0x4C, 0x89, 0x7C, 0x24, 0x68
+};
+constexpr std::uint8_t WidgetGetSizeBytes[16]{
+    0x40, 0x53, 0x48, 0x83, 0xEC, 0x30, 0x80, 0x79, 0x52, 0x00, 0x48, 0x8B, 0xDA, 0x74, 0x2A, 0x48
+};
+constexpr std::uint8_t WidgetGetScreenPosBytes[16]{
+    0x48, 0x8B, 0xC4, 0x48, 0x89, 0x70, 0x20, 0x57, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00, 0x0F
+};
 
 struct StashState {
     bool open{};
@@ -71,27 +120,28 @@ int FontSize{DefaultFontSize};
 
 constexpr D2RL::PluginInfo Info{
     .infoSize = D2RL::PluginInfoSize,
-    .apiVersion = D2RL_PLUGIN_API_VERSION,
+    .abiVersion = D2RL_PLUGIN_ABI_VERSION,
     .id = PluginId,
     .name = "Shared Stash Page Text",
-    .version = "0.1.24",
+    .version = "0.1.38",
     .author = "MadMike",
     .description = "Editable colored notes for Shared stash pages.",
-    .flags = D2RL::PluginFlags::Client,
+    .flags = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
 };
 
 const D2RL::PluginContext* Context{};
-const D2RL::ThreadServiceV1* ThreadService{};
-const D2RL::ResourceServiceV1* ResourceService{};
-const D2RL::PanelServiceV1* PanelService{};
-const D2RL::SharedEventServiceV1* EventService{};
-const D2RL::LifecycleServiceV1* LifecycleService{};
+const D2RL::ThreadService* ThreadService{};
+const D2RL::ResourceService* ResourceService{};
+const D2RL::PanelService* PanelService{};
+const D2RL::SharedEventService* EventService{};
+const D2RL::LifecycleService* LifecycleService{};
 D2RL::Resources::RegistrationHandle LayoutHandle{D2RL::Resources::InvalidHandle};
 D2RL::Panels::RegistrationHandle PanelHandle{D2RL::Panels::InvalidHandle};
 D2RL::SharedEvents::ListenerHandle MessageHandle{D2RL::SharedEvents::InvalidHandle};
 D2RL::Lifecycle::ListenerHandle GameJoinedHandle{D2RL::Lifecycle::InvalidHandle};
 
 std::array<PageNote, MaximumPageCount> Pages{};
+std::mutex RenderSnapshotMutex;
 WindowPlacement Placement{};
 std::size_t ConfiguredPageCount{DefaultPageCount};
 std::string LayoutJson;
@@ -102,6 +152,7 @@ bool StashOpen{};
 std::atomic_bool NewGamePending{};
 std::atomic_bool SyncPending{};
 std::atomic_bool Active{};
+std::atomic_bool PageNoteRenderEnabled{};
 
 HWND HostWindow{};
 HWND OverlayWindow{};
@@ -112,8 +163,18 @@ WNDPROC PreviousEditorWindowProc{};
 HHOOK MessageHook{};
 HHOOK KeyboardHook{};
 DWORD HostWindowThreadId{};
+HANDLE KeyboardHookThreadHandle{};
+HANDLE KeyboardHookReadyEvent{};
+DWORD KeyboardHookThreadId{};
+std::atomic<HWND> KeyboardTargetEditor{};
+std::atomic<HWND> KeyboardTargetHost{};
+std::atomic<DWORD> KeyboardTargetThreadId{};
+std::array<std::uint8_t, 256> ForwardedKeyDown{};
 HBRUSH EditorBackgroundBrush{};
 HFONT EditorFont{};
+BankPanelDrawFn OriginalBankPanelDraw{};
+DrawStyledTextFn OriginalDrawStyledText{};
+thread_local bool DrawingPageNote{};
 std::wstring EditorFontFamilyWide;
 std::wstring LoadedGameFontPath;
 int EditorFontHeight{};
@@ -681,13 +742,21 @@ void SavePageInput() noexcept {
         const int characterCount = GetWindowTextLengthW(EditorWindow);
         std::vector<wchar_t> buffer(static_cast<std::size_t>((std::max)(characterCount, 0)) + 1, L'\0');
         const int copied = GetWindowTextW(EditorWindow, buffer.data(), static_cast<int>(buffer.size()));
-        auto& note = Pages[page - 1].text;
         std::string edited = WideToUtf8Limited(buffer.data(), copied);
-        if (note == edited) return;
-        note = std::move(edited);
+        std::size_t noteBytes{};
+        {
+            std::lock_guard lock(RenderSnapshotMutex);
+            auto& note = Pages[page - 1].text;
+            if (note == edited) return;
+            note = std::move(edited);
+            noteBytes = note.size();
+        }
         D2RL::LogInfoF(Context, "SharedStashPageText: saved page=%zu textBytes=%zu",
-            page, note.size());
+            page, noteBytes);
         (void)PersistConfig();
+        if (HostWindow != nullptr && IsWindow(HostWindow)) {
+            (void)InvalidateRect(HostWindow, nullptr, FALSE);
+        }
     } catch (...) {
         Context->LogError("SharedStashPageText: could not read or save the native note editor.");
     }
@@ -747,6 +816,543 @@ void PositionNativeEditor() noexcept {
     }
 }
 
+auto VerifyNativeBytes(std::uintptr_t address, const std::uint8_t* expected,
+        std::size_t size) noexcept -> bool {
+    if (address == 0 || expected == nullptr || size == 0) return false;
+    __try {
+        const auto* actual = reinterpret_cast<const std::uint8_t*>(address);
+        for (std::size_t index = 0; index < size; ++index) {
+            if (actual[index] != expected[index]) return false;
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+auto SafeFindChild(std::uintptr_t parent, const char* name,
+        std::uintptr_t* child) noexcept -> bool {
+    if (Context == nullptr || parent == 0 || name == nullptr || child == nullptr) return false;
+    __try {
+        using FindChildFn = std::uintptr_t(__fastcall*)(std::uintptr_t, const char*);
+        const auto findChild = reinterpret_cast<FindChildFn>(Context->exeBase + WidgetFindChildRva);
+        *child = findChild(parent, name);
+        return *child != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *child = 0;
+        return false;
+    }
+}
+
+auto SafeWidgetGetScreenPos(std::uintptr_t widget, std::int32_t output[2]) noexcept -> bool {
+    if (Context == nullptr || widget == 0 || output == nullptr) return false;
+    __try {
+        using WidgetGetScreenPosFn = std::int32_t*(__fastcall*)(std::uintptr_t, std::int32_t*);
+        auto* const returned = reinterpret_cast<WidgetGetScreenPosFn>(
+            Context->exeBase + WidgetGetScreenPosRva)(widget, output);
+        return returned == output;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+auto SafeWidgetGetSize(std::uintptr_t widget, std::int32_t output[4]) noexcept -> bool {
+    if (Context == nullptr || widget == 0 || output == nullptr) return false;
+    __try {
+        using WidgetGetSizeFn = std::int32_t*(__fastcall*)(std::uintptr_t, std::int32_t*);
+        auto* const returned = reinterpret_cast<WidgetGetSizeFn>(
+            Context->exeBase + WidgetGetSizeRva)(widget, output);
+        return returned == output;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+auto SafeReadPageLabelFont(std::uintptr_t widget, std::uint32_t* fontIndex) noexcept -> bool {
+    if (widget == 0 || fontIndex == nullptr) return false;
+    __try {
+        *fontIndex = *reinterpret_cast<const std::uint32_t*>(widget + WidgetFontIndexOffset);
+        return *fontIndex < 256;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *fontIndex = 0;
+        return false;
+    }
+}
+
+auto SafeCopyTextStyleParams(std::uintptr_t widget, std::uint8_t* output) noexcept -> bool {
+    constexpr std::size_t TextStyleParamsSize = 0xA0;
+    constexpr std::size_t TextStyleParamsOffset = 0xB4;
+    if (widget == 0 || output == nullptr
+            || widget > (std::numeric_limits<std::uintptr_t>::max)()
+                - TextStyleParamsOffset - TextStyleParamsSize) return false;
+    __try {
+        std::memcpy(output, reinterpret_cast<const void*>(widget + TextStyleParamsOffset),
+            TextStyleParamsSize);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+auto SafeComputeWidgetHierarchyScale(std::uintptr_t widget, float* totalScale) noexcept -> bool {
+    if (widget == 0 || totalScale == nullptr) return false;
+    __try {
+        float scale = 1.0f;
+        std::uintptr_t current = widget;
+        for (std::size_t depth = 0; depth <= 64; ++depth) {
+            const float nodeScale = *reinterpret_cast<const float*>(current + 0x80);
+            if (!std::isfinite(nodeScale) || nodeScale <= 0.0f || nodeScale > 8.0f) return false;
+            scale *= nodeScale;
+            if (!std::isfinite(scale) || scale <= 0.0f || scale > 8.0f) return false;
+
+            const std::uintptr_t parent = *reinterpret_cast<const std::uintptr_t*>(current + 0x30);
+            if (parent == 0) {
+                *totalScale = scale;
+                return true;
+            }
+            if (parent == current || depth == 64) return false;
+            current = parent;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return false;
+}
+
+auto SafeInitTextStyle(void* styleBuffer, std::uint32_t fontIndex, const void* styleParams) noexcept -> bool {
+    if (Context == nullptr || styleBuffer == nullptr || styleParams == nullptr) return false;
+    __try {
+        using InitTextStyleFn = std::uintptr_t(__fastcall*)(void*, std::uint32_t, const void*);
+        const auto initialize = reinterpret_cast<InitTextStyleFn>(Context->exeBase + InitTextStyleRva);
+        return initialize(styleBuffer, fontIndex, styleParams) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+auto SafeMeasureText(const char* text, const NativeRect* rect, const void* style,
+        float scale, std::uint32_t* width, std::uint32_t* height) noexcept -> bool {
+    if (Context == nullptr || text == nullptr || rect == nullptr || style == nullptr
+            || width == nullptr || height == nullptr || !std::isfinite(scale) || scale <= 0.0f) return false;
+    __try {
+        using MeasureTextFn = std::uint64_t(__fastcall*)(const char*, const void*, float, const NativeRect*);
+        const auto measure = reinterpret_cast<MeasureTextFn>(Context->exeBase + MeasureStyledTextRva);
+        const std::uint64_t packed = measure(text, style, scale, rect);
+        *width = static_cast<std::uint32_t>(packed & 0xFFFFFFFFu);
+        *height = static_cast<std::uint32_t>(packed >> 32);
+        return *width < 0x80000000u && *height < 0x80000000u;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *width = 0;
+        *height = 0;
+        return false;
+    }
+}
+
+void SafeDrawFilledRect(const NativeRect& rect, const float color[4]) noexcept {
+    if (Context == nullptr || color == nullptr || rect.width <= 0 || rect.height <= 0) return;
+    const std::int64_t right = static_cast<std::int64_t>(rect.x) + rect.width;
+    const std::int64_t bottom = static_cast<std::int64_t>(rect.y) + rect.height;
+    if (right > (std::numeric_limits<int>::max)() || bottom > (std::numeric_limits<int>::max)()) return;
+    __try {
+        using DrawFilledRectFn = void(__fastcall*)(int, int, int, int, const float*, int);
+        const auto draw = reinterpret_cast<DrawFilledRectFn>(Context->exeBase + DrawFilledRectRva);
+        draw(rect.x, rect.y, static_cast<int>(right), static_cast<int>(bottom), color, 1);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+auto SafeDrawStyledText(const char* text, const NativeRect& rect, const void* style,
+        float scale) noexcept -> bool {
+    if (Context == nullptr || Context->exeBase == 0 || text == nullptr || style == nullptr || rect.width <= 0
+            || rect.height <= 0 || !std::isfinite(scale) || scale <= 0.0f) return false;
+    __try {
+        const auto draw = reinterpret_cast<DrawStyledTextFn>(Context->exeBase + DrawStyledTextRva);
+        draw(text, &rect, style, scale);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+auto WideTextToUtf8(const wchar_t* source, int sourceLength,
+        char* destination, int destinationCapacity) noexcept -> int {
+    if (source == nullptr || sourceLength <= 0 || destination == nullptr || destinationCapacity <= 0) {
+        if (destination != nullptr && destinationCapacity > 0) destination[0] = '\0';
+        return 0;
+    }
+    const int converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        source, sourceLength, destination, destinationCapacity - 1, nullptr, nullptr);
+    if (converted <= 0) {
+        destination[0] = '\0';
+        return 0;
+    }
+    destination[converted] = '\0';
+    return converted;
+}
+
+void DrawNativeCaret(const NativeRect& rect, const char* noteText,
+        const void* style, float scale, const float color[4]) noexcept {
+    if (EditorWindow == nullptr || GetFocus() != EditorWindow || noteText == nullptr) return;
+    if (((GetTickCount64() / 500ULL) & 1ULL) != 0) return;
+
+    wchar_t wideText[MaximumNoteBytes + 1]{};
+    const int copied = GetWindowTextW(EditorWindow, wideText,
+        static_cast<int>(std::size(wideText)));
+    if (copied < 0) return;
+    DWORD selectionStart{};
+    DWORD selectionEnd{};
+    (void)SendMessageW(EditorWindow, EM_GETSEL,
+        reinterpret_cast<WPARAM>(&selectionStart), reinterpret_cast<LPARAM>(&selectionEnd));
+    const int caretIndex = static_cast<int>((std::clamp)(selectionEnd,
+        DWORD{0}, static_cast<DWORD>(copied)));
+
+    char utf8Text[MaximumNoteBytes + 1]{};
+    char utf8Prefix[MaximumNoteBytes + 1]{};
+    (void)WideTextToUtf8(wideText, copied, utf8Text, static_cast<int>(std::size(utf8Text)));
+    (void)WideTextToUtf8(wideText, caretIndex, utf8Prefix, static_cast<int>(std::size(utf8Prefix)));
+    std::uint32_t noteWidth{};
+    std::uint32_t noteHeight{};
+    std::uint32_t prefixWidth{};
+    std::uint32_t prefixHeight{};
+    (void)SafeMeasureText(utf8Text, &rect, style, scale, &noteWidth, &noteHeight);
+    (void)SafeMeasureText(utf8Prefix, &rect, style, scale, &prefixWidth, &prefixHeight);
+    const int left = rect.x + (rect.width - static_cast<int>(noteWidth)) / 2
+        + static_cast<int>(prefixWidth);
+    const int maximumCaretHeight = (std::max)(1, rect.height - 2);
+    const int measuredCaretHeight = noteHeight != 0
+        ? static_cast<int>((std::min)(noteHeight, static_cast<std::uint32_t>(maximumCaretHeight)))
+        : static_cast<int>(std::lround(DefaultFontSize * scale));
+    const int caretHeight = (std::clamp)(measuredCaretHeight, 1, maximumCaretHeight);
+    const int caretWidth = (std::clamp)(static_cast<int>(std::lround(scale * 3.0f)), 2, 4);
+    const int caretTop = rect.y + (rect.height - caretHeight) / 2;
+    const NativeRect caret{left, caretTop, caretWidth, caretHeight};
+    SafeDrawFilledRect(caret, color);
+}
+
+void DrawPageNoteInGame(std::uintptr_t bankPanel) noexcept {
+    if (!Active.load(std::memory_order_acquire) || Context == nullptr || HostWindow == nullptr
+            || OverlayWindow == nullptr || !IsWindowVisible(OverlayWindow) || bankPanel == 0) return;
+
+    std::size_t page{};
+    std::array<char, MaximumNoteBytes + 1> noteText{};
+    std::array<std::uint8_t, 3> noteColor{};
+    {
+        std::lock_guard lock(RenderSnapshotMutex);
+        page = CurrentPage;
+        if (!StashOpen || !SharedTabSelected || page == 0
+                || page > ConfiguredPageCount || page > Pages.size()) return;
+        const auto& note = Pages[page - 1];
+        const std::size_t noteLength = (std::min)(note.text.size(), MaximumNoteBytes);
+        if (noteLength != 0) std::memcpy(noteText.data(), note.text.data(), noteLength);
+        noteColor = note.color;
+    }
+    static thread_local std::size_t lastRenderedPage{};
+    static thread_local std::array<char, MaximumNoteBytes + 1> lastRenderedText{};
+    const bool snapshotChanged = page != lastRenderedPage || noteText != lastRenderedText;
+    if (snapshotChanged) {
+        lastRenderedPage = page;
+        lastRenderedText = noteText;
+        D2RL::LogInfoF(Context, "SharedStashPageText: renderer snapshot page=%zu textBytes=%zu",
+            page, std::char_traits<char>::length(noteText.data()));
+    }
+    std::uint32_t textWidth{};
+    std::uint32_t textHeight{};
+    std::uint32_t fontIndex{};
+    float textScale{};
+    NativeRect noteRect{};
+    const char* fontSource = "unset";
+    const char* scaleSource = "unset";
+    const auto reportDrawStage = [&](const char* stage) noexcept {
+        if (snapshotChanged) {
+            D2RL::LogInfoF(Context,
+                "SharedStashPageText: renderer output page=%zu textBytes=%zu measure=%ux%u rect=%d,%d,%dx%d scale=%.3f font=%s:%u scaleSource=%s styleSource=widget stage=%s",
+                page, std::char_traits<char>::length(noteText.data()), textWidth, textHeight,
+                noteRect.x, noteRect.y, noteRect.width, noteRect.height, static_cast<double>(textScale),
+                fontSource, fontIndex, scaleSource, stage);
+        }
+    };
+
+    RECT client{};
+    if (!GetClientRect(HostWindow, &client)) {
+        reportDrawStage("client-rect-failed");
+        return;
+    }
+    const int clientWidth = client.right - client.left;
+    const int clientHeight = client.bottom - client.top;
+    if (clientWidth <= 0 || clientHeight <= 0) {
+        reportDrawStage("client-size-invalid");
+        return;
+    }
+    const double windowScale = static_cast<double>(clientHeight) / VirtualLayoutHeight;
+    noteRect = NativeRect{
+        static_cast<int>(std::lround(Placement.anchorX * clientWidth + Placement.x * windowScale)),
+        static_cast<int>(std::lround(Placement.anchorY * clientHeight + Placement.y * windowScale)),
+        (std::max)(1, static_cast<int>(std::lround(Placement.width * windowScale))),
+        (std::max)(1, static_cast<int>(std::lround(Placement.height * windowScale))),
+    };
+
+    std::uintptr_t styleSourceWidget{};
+    if (SafeFindChild(bankPanel, "gold_amount", &styleSourceWidget) && styleSourceWidget != 0) {
+        fontSource = "gold_amount";
+    } else if (SafeFindChild(bankPanel, "title", &styleSourceWidget) && styleSourceWidget != 0) {
+        fontSource = "title";
+    } else {
+        reportDrawStage("text-style-source-not-found");
+        return;
+    }
+    if (!SafeReadPageLabelFont(styleSourceWidget, &fontIndex)) {
+        reportDrawStage("page-label-font-failed");
+        return;
+    }
+    // The native TextStyle block stores RGB as 32-bit channel values at +0x08,
+    // +0x0C, and +0x10. The observed gold_amount style is #D1C378 and the title
+    // style is #FFFFFF, matching those fields. Keep the rest of the game's
+    // style intact so font, alignment, and scaling continue to come from D2R.
+    alignas(16) std::array<std::uint8_t, 0xA0> textStyleParams{};
+    if (!SafeCopyTextStyleParams(styleSourceWidget, textStyleParams.data())) {
+        reportDrawStage("text-style-copy-failed");
+        return;
+    }
+    for (std::size_t channel = 0; channel < noteColor.size(); ++channel) {
+        const std::uint32_t value = noteColor[channel];
+        std::memcpy(textStyleParams.data() + 0x08 + channel * sizeof(value), &value, sizeof(value));
+    }
+    alignas(16) const float caretColor[4]{
+        static_cast<float>(noteColor[0]) / 255.0f,
+        static_cast<float>(noteColor[1]) / 255.0f,
+        static_cast<float>(noteColor[2]) / 255.0f,
+        1.0f,
+    };
+    alignas(16) std::uint8_t styleBuffer[0xB0]{};
+    if (!SafeInitTextStyle(styleBuffer, fontIndex, textStyleParams.data())) {
+        reportDrawStage("text-style-init-failed");
+        return;
+    }
+
+    constexpr float backgroundColor[4]{0.018f, 0.016f, 0.014f, 0.94f};
+    SafeDrawFilledRect(noteRect, backgroundColor);
+    float uiScale{};
+    if (!SafeComputeWidgetHierarchyScale(styleSourceWidget, &uiScale)) {
+        uiScale = static_cast<float>(windowScale);
+        scaleSource = "window-fallback";
+    } else {
+        scaleSource = "widget-hierarchy";
+    }
+    textScale = uiScale * static_cast<float>(FontSize) / static_cast<float>(DefaultFontSize);
+    const char* drawStage = noteText[0] == '\0' ? "empty-note" : "measure-failed";
+    if (noteText[0] != '\0') {
+        const bool measured = SafeMeasureText(noteText.data(), &noteRect, styleBuffer, textScale,
+            &textWidth, &textHeight);
+        if (!measured || textWidth == 0 || textHeight == 0) {
+            drawStage = SafeDrawStyledText(noteText.data(), noteRect, styleBuffer, textScale)
+                ? "text-draw-full-rect-fallback" : "text-draw-failed";
+        } else {
+            const int drawWidth = (std::clamp)(static_cast<int>(textWidth), 1, noteRect.width);
+            const int drawHeight = (std::clamp)(static_cast<int>(textHeight), 1, noteRect.height);
+            constexpr int textBoundsPadding = 2;
+            const int textLeft = (std::max)(noteRect.x,
+                noteRect.x + (noteRect.width - drawWidth) / 2 - textBoundsPadding);
+            const int textTop = (std::max)(noteRect.y,
+                noteRect.y + (noteRect.height - drawHeight) / 2 - textBoundsPadding);
+            const int textRight = noteRect.x + noteRect.width;
+            const int textBottom = noteRect.y + noteRect.height;
+            const NativeRect textRect{
+                textLeft,
+                textTop,
+                (std::min)(textRight - textLeft, drawWidth + textBoundsPadding * 2),
+                (std::min)(textBottom - textTop, drawHeight + textBoundsPadding * 2),
+            };
+            drawStage = SafeDrawStyledText(noteText.data(), textRect, styleBuffer, textScale)
+                ? "text-draw-called" : "text-draw-failed";
+        }
+    }
+    DrawNativeCaret(noteRect, noteText.data(), styleBuffer, textScale, caretColor);
+    reportDrawStage(drawStage);
+}
+
+auto SafeCallOriginalDrawStyledText(const char* text, const NativeRect* rect,
+        const void* style, float scale) noexcept -> bool {
+    if (OriginalDrawStyledText == nullptr || text == nullptr || rect == nullptr || style == nullptr) return false;
+    __try {
+        OriginalDrawStyledText(text, rect, style, scale);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+auto SafeFindVisibleSharedBankPanel() noexcept -> std::uintptr_t {
+    if (Context == nullptr || Context->exeBase == 0) return 0;
+    __try {
+        using FindPanelFn = const std::byte*(__fastcall*)(int);
+        using GetTabFn = std::uint8_t(__fastcall*)(const void*);
+        const auto findPanel = reinterpret_cast<FindPanelFn>(Context->exeBase + FindStockPanelRva);
+        const auto getTab = reinterpret_cast<GetTabFn>(Context->exeBase + GetBankTabRva);
+        const std::byte* panel = findPanel(BankPanelId);
+        if (panel == nullptr || panel[WidgetVisibleOffset] == std::byte{} || getTab(panel) != 1) return 0;
+        return reinterpret_cast<std::uintptr_t>(panel);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+auto ReadSharedPageLabelRect(std::uintptr_t bankPanel, NativeRect* output) noexcept -> bool {
+    if (bankPanel == 0 || output == nullptr) return false;
+    std::uintptr_t pageLabel{};
+    if (!SafeFindChild(bankPanel, "CurrentSharedStashText", &pageLabel) || pageLabel == 0) return false;
+    std::int32_t screenPosition[2]{};
+    std::int32_t widgetRect[4]{};
+    if (!SafeWidgetGetScreenPos(pageLabel, screenPosition)
+            || !SafeWidgetGetSize(pageLabel, widgetRect)
+            || widgetRect[2] <= 0 || widgetRect[3] <= 0) return false;
+    float hierarchyScale{};
+    if (!SafeComputeWidgetHierarchyScale(pageLabel, &hierarchyScale)) return false;
+    const double width = static_cast<double>(widgetRect[2]) * hierarchyScale;
+    const double height = static_cast<double>(widgetRect[3]) * hierarchyScale;
+    if (!std::isfinite(width) || !std::isfinite(height)
+            || width < 1.0 || height < 1.0
+            || width > (std::numeric_limits<int>::max)()
+            || height > (std::numeric_limits<int>::max)()) return false;
+    *output = NativeRect{
+        screenPosition[0], screenPosition[1],
+        static_cast<int>(std::lround(width)), static_cast<int>(std::lround(height)),
+    };
+    return true;
+}
+
+auto IsSharedPageLabelDraw(const NativeRect* drawRect, std::uintptr_t* bankPanelOut) noexcept -> bool {
+    if (drawRect == nullptr || bankPanelOut == nullptr || drawRect->width <= 0 || drawRect->height <= 0
+            || DrawingPageNote || !Active.load(std::memory_order_acquire)
+            || !PageNoteRenderEnabled.load(std::memory_order_acquire)) return false;
+
+    struct PageLabelCache {
+        std::uintptr_t panel{};
+        NativeRect rect{};
+        ULONGLONG refreshAt{};
+        bool valid{};
+    };
+    static thread_local PageLabelCache cache{};
+    const ULONGLONG now = GetTickCount64();
+    if (now >= cache.refreshAt) {
+        cache.valid = false;
+        cache.panel = OverlayWindow != nullptr && IsWindowVisible(OverlayWindow)
+            ? SafeFindVisibleSharedBankPanel() : 0;
+        cache.valid = cache.panel != 0 && ReadSharedPageLabelRect(cache.panel, &cache.rect);
+        cache.refreshAt = now + 200;
+    }
+    if (!cache.valid) return false;
+
+    const long long drawCenterX = static_cast<long long>(drawRect->x) * 2 + drawRect->width;
+    const long long drawCenterY = static_cast<long long>(drawRect->y) * 2 + drawRect->height;
+    const long long labelCenterX = static_cast<long long>(cache.rect.x) * 2 + cache.rect.width;
+    const long long labelCenterY = static_cast<long long>(cache.rect.y) * 2 + cache.rect.height;
+    const long long centerToleranceX = (std::max)(12LL, static_cast<long long>(cache.rect.width) / 8);
+    const long long centerToleranceY = (std::max)(12LL, static_cast<long long>(cache.rect.height) / 4);
+    const long long drawLeft = drawRect->x;
+    const long long drawTop = drawRect->y;
+    const long long drawRight = drawLeft + drawRect->width;
+    const long long drawBottom = drawTop + drawRect->height;
+    const long long labelLeft = cache.rect.x;
+    const long long labelTop = cache.rect.y;
+    const long long labelRight = labelLeft + cache.rect.width;
+    const long long labelBottom = labelTop + cache.rect.height;
+    const long long overlapWidth = (std::min)(drawRight, labelRight) - (std::max)(drawLeft, labelLeft);
+    const long long overlapHeight = (std::min)(drawBottom, labelBottom) - (std::max)(drawTop, labelTop);
+    if (std::llabs(drawCenterX - labelCenterX) > centerToleranceX
+            || std::llabs(drawCenterY - labelCenterY) > centerToleranceY
+            || overlapWidth <= 0 || overlapHeight <= 0
+            || overlapWidth * 2 < (std::min)(drawRect->width, cache.rect.width)
+            || overlapHeight * 2 < (std::min)(drawRect->height, cache.rect.height)) return false;
+
+    *bankPanelOut = cache.panel;
+    return true;
+}
+
+void __fastcall NativeDrawStyledText(const char* text, const NativeRect* rect,
+        const void* style, float scale) noexcept {
+    if (!SafeCallOriginalDrawStyledText(text, rect, style, scale)) return;
+    std::uintptr_t bankPanel{};
+    if (!IsSharedPageLabelDraw(rect, &bankPanel)) return;
+    DrawingPageNote = true;
+    DrawPageNoteInGame(bankPanel);
+    DrawingPageNote = false;
+}
+
+auto SafeCallBankPanelDraw(BankPanelDrawFn draw, void* panel) noexcept -> bool {
+    if (draw == nullptr || panel == nullptr) return false;
+    __try {
+        draw(panel);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void __fastcall NativeBankPanelDraw(void* panel) noexcept {
+    if (panel == nullptr || !SafeCallBankPanelDraw(OriginalBankPanelDraw, panel)) return;
+    DrawPageNoteInGame(reinterpret_cast<std::uintptr_t>(panel));
+}
+
+auto InitializeNativeRenderer() noexcept -> bool {
+    if (Context == nullptr || Context->exeBase == 0) return false;
+    OriginalBankPanelDraw = nullptr;
+    OriginalDrawStyledText = nullptr;
+    const std::uintptr_t base = Context->exeBase;
+    const bool bankPanelDrawMatches =
+        VerifyNativeBytes(base + BankPanelDrawRva, BankPanelDrawBytes, sizeof(BankPanelDrawBytes));
+    const bool widgetFindChildMatches =
+        VerifyNativeBytes(base + WidgetFindChildRva, WidgetFindChildBytes, sizeof(WidgetFindChildBytes));
+    const bool initTextStyleMatches =
+        VerifyNativeBytes(base + InitTextStyleRva, InitTextStyleBytes, sizeof(InitTextStyleBytes));
+    const bool drawStyledTextMatches =
+        VerifyNativeBytes(base + DrawStyledTextRva, DrawStyledTextBytes, sizeof(DrawStyledTextBytes));
+    const bool measureStyledTextMatches =
+        VerifyNativeBytes(base + MeasureStyledTextRva, MeasureStyledTextBytes, sizeof(MeasureStyledTextBytes));
+    const bool drawFilledRectMatches =
+        VerifyNativeBytes(base + DrawFilledRectRva, DrawFilledRectBytes, sizeof(DrawFilledRectBytes));
+    const bool widgetGetSizeMatches =
+        VerifyNativeBytes(base + WidgetGetSizeRva, WidgetGetSizeBytes, sizeof(WidgetGetSizeBytes));
+    const bool widgetGetScreenPosMatches =
+        VerifyNativeBytes(base + WidgetGetScreenPosRva, WidgetGetScreenPosBytes, sizeof(WidgetGetScreenPosBytes));
+    if (!widgetFindChildMatches || !initTextStyleMatches || !drawStyledTextMatches
+            || !measureStyledTextMatches || !drawFilledRectMatches
+            || !widgetGetSizeMatches || !widgetGetScreenPosMatches) {
+        D2RL::LogInfoF(Context,
+            "SharedStashPageText: native text signatures widget=%d widgetSize=%d widgetPos=%d initStyle=%d drawText=%d measureText=%d fillRect=%d",
+            widgetFindChildMatches ? 1 : 0, widgetGetSizeMatches ? 1 : 0,
+            widgetGetScreenPosMatches ? 1 : 0, initTextStyleMatches ? 1 : 0,
+            drawStyledTextMatches ? 1 : 0, measureStyledTextMatches ? 1 : 0,
+            drawFilledRectMatches ? 1 : 0);
+        Context->LogError("SharedStashPageText: native text signatures did not match; refusing the renderer hook.");
+        return false;
+    }
+
+    if (Context->InstallInlineHook(DrawStyledTextRva, DrawStyledTextBytes,
+            static_cast<std::uint32_t>(sizeof(DrawStyledTextBytes)),
+            &NativeDrawStyledText, &OriginalDrawStyledText)
+            && OriginalDrawStyledText != nullptr) {
+        Context->LogInfo("SharedStashPageText: DrawStyledText hook registered; notes render after the Shared page label.");
+        return true;
+    }
+    OriginalDrawStyledText = nullptr;
+    Context->LogWarn("SharedStashPageText: independent DrawStyledText hook unavailable; trying BankPanel::Draw fallback.");
+
+    if (!bankPanelDrawMatches) {
+        Context->LogError("SharedStashPageText: BankPanel::Draw is already patched and DrawStyledText could not be hooked.");
+        return false;
+    }
+    if (!Context->InstallInlineHook(BankPanelDrawRva, BankPanelDrawBytes,
+            static_cast<std::uint32_t>(sizeof(BankPanelDrawBytes)),
+            &NativeBankPanelDraw, &OriginalBankPanelDraw)
+            || OriginalBankPanelDraw == nullptr) {
+        Context->LogError("SharedStashPageText: D2RLoader rejected the BankPanel::Draw fallback hook.");
+        OriginalBankPanelDraw = nullptr;
+        return false;
+    }
+    Context->LogInfo("SharedStashPageText: BankPanel::Draw fallback hook registered.");
+    return true;
+}
+
 void SetNativeEditorVisible(bool visible) noexcept {
     if (OverlayWindow == nullptr || EditorWindow == nullptr) return;
     if (visible) {
@@ -803,31 +1409,184 @@ LRESULT CALLBACK NativeEditorWindowProc(HWND window, UINT message, WPARAM wParam
     return result;
 }
 
-LRESULT CALLBACK NativeKeyboardHook(int code, WPARAM wParam, LPARAM lParam) noexcept {
-    const bool keyUp = (static_cast<ULONG_PTR>(lParam) & (ULONG_PTR{1} << 31)) != 0;
-    if (code == HC_ACTION && EditorWindow != nullptr && IsWindowVisible(EditorWindow)
-            && GetFocus() == EditorWindow) {
-        const bool altContext = (static_cast<ULONG_PTR>(lParam) & (ULONG_PTR{1} << 29)) != 0
-            || wParam == VK_MENU || wParam == VK_F10;
-        const UINT message = keyUp
-            ? (altContext ? WM_SYSKEYUP : WM_KEYUP)
-            : (altContext ? WM_SYSKEYDOWN : WM_KEYDOWN);
+auto IsNoteEditorFocused(HWND editor, HWND host, DWORD threadId) noexcept -> bool {
+    if (editor == nullptr || host == nullptr || threadId == 0
+            || !IsWindow(editor) || !IsWindowVisible(editor)) return false;
 
-        // WH_KEYBOARD runs as the host removes a key message from its queue.
-        // Deliver it directly to the focused EDIT control, then discard the
-        // original so D2R's UI hotkeys cannot also consume the same key.
-        (void)SendMessageW(EditorWindow, message, wParam, lParam);
-        if (!keyUp && wParam != VK_RETURN && wParam != VK_ESCAPE) {
-            MSG translated{};
-            translated.hwnd = EditorWindow;
-            translated.message = message;
-            translated.wParam = wParam;
-            translated.lParam = lParam;
-            (void)TranslateMessage(&translated);
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr
+            || GetAncestor(foreground, GA_ROOTOWNER) != GetAncestor(host, GA_ROOTOWNER)) return false;
+
+    GUITHREADINFO threadInfo{};
+    threadInfo.cbSize = static_cast<DWORD>(sizeof(threadInfo));
+    return GetGUIThreadInfo(threadId, &threadInfo) && threadInfo.hwndFocus == editor;
+}
+
+auto IsModifierOrSystemVk(DWORD key) noexcept -> bool {
+    switch (key) {
+    case VK_SHIFT:
+    case VK_LSHIFT:
+    case VK_RSHIFT:
+    case VK_CONTROL:
+    case VK_LCONTROL:
+    case VK_RCONTROL:
+    case VK_MENU:
+    case VK_LMENU:
+    case VK_RMENU:
+    case VK_LWIN:
+    case VK_RWIN:
+    case VK_CAPITAL:
+    case VK_NUMLOCK:
+    case VK_SCROLL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+LRESULT CALLBACK NativeKeyboardHook(int code, WPARAM wParam, LPARAM lParam) noexcept {
+    const auto* keyInfo = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+    if (code < 0 || keyInfo == nullptr
+            || (wParam != WM_KEYDOWN && wParam != WM_KEYUP && wParam != WM_SYSKEYDOWN && wParam != WM_SYSKEYUP)) {
+        return CallNextHookEx(KeyboardHook, code, wParam, lParam);
+    }
+
+    const DWORD key = keyInfo->vkCode;
+    if (key > 0xFF || IsModifierOrSystemVk(key)) {
+        return CallNextHookEx(KeyboardHook, code, wParam, lParam);
+    }
+
+    const bool keyUp = wParam == WM_KEYUP || wParam == WM_SYSKEYUP;
+    if (keyUp) {
+        if (ForwardedKeyDown[key] == 0) return CallNextHookEx(KeyboardHook, code, wParam, lParam);
+        ForwardedKeyDown[key] = 0;
+    } else {
+        const HWND editor = KeyboardTargetEditor.load(std::memory_order_acquire);
+        const HWND host = KeyboardTargetHost.load(std::memory_order_acquire);
+        const DWORD threadId = KeyboardTargetThreadId.load(std::memory_order_acquire);
+        if (!Active.load(std::memory_order_acquire) || !IsNoteEditorFocused(editor, host, threadId)) {
+            return CallNextHookEx(KeyboardHook, code, wParam, lParam);
         }
+    }
+
+    const HWND editor = KeyboardTargetEditor.load(std::memory_order_acquire);
+    if (editor == nullptr || !IsWindow(editor)) {
+        ForwardedKeyDown[key] = 0;
+        return CallNextHookEx(KeyboardHook, code, wParam, lParam);
+    }
+
+    const bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const bool altHeld = (keyInfo->flags & LLKHF_ALTDOWN) != 0
+        || (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    const bool winHeld = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0
+        || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+    if (!keyUp && (winHeld || (altHeld && !ctrlHeld))) {
+        return CallNextHookEx(KeyboardHook, code, wParam, lParam);
+    }
+
+    LPARAM messageLParam = static_cast<LPARAM>(
+        ((keyInfo->flags & LLKHF_EXTENDED) != 0 ? 0x01000000ULL : 0ULL) + 1ULL
+        | (static_cast<std::uint64_t>(static_cast<std::uint8_t>(keyInfo->scanCode)) << 16));
+    if ((keyInfo->flags & LLKHF_ALTDOWN) != 0) messageLParam |= 0x20000000LL;
+    if (keyUp) messageLParam |= static_cast<LPARAM>(0xC0000000ULL);
+
+    WPARAM messageWParam = key;
+    UINT messageId = keyUp ? WM_KEYUP : WM_KEYDOWN;
+    if (!keyUp && ctrlHeld && !altHeld) {
+        switch (key) {
+        case 'A': messageId = WM_CHAR; messageWParam = 0x01; break;
+        case 'C': messageId = WM_CHAR; messageWParam = 0x03; break;
+        case 'V': messageId = WM_CHAR; messageWParam = 0x16; break;
+        case 'X': messageId = WM_CHAR; messageWParam = 0x18; break;
+        case 'Z': messageId = WM_CHAR; messageWParam = 0x1A; break;
+        default: break;
+        }
+    }
+
+    if (PostMessageW(editor, messageId, messageWParam, messageLParam)) {
+        if (!keyUp) ForwardedKeyDown[key] = 1;
         return 1;
     }
+    ForwardedKeyDown[key] = 0;
     return CallNextHookEx(KeyboardHook, code, wParam, lParam);
+}
+
+DWORD WINAPI NativeKeyboardHookThread(LPVOID) noexcept {
+    MSG message{};
+    (void)PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+
+    HMODULE module{};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&NativeKeyboardHook), &module)) {
+        KeyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, NativeKeyboardHook, module, 0);
+    }
+    if (KeyboardHookReadyEvent != nullptr) SetEvent(KeyboardHookReadyEvent);
+
+    if (KeyboardHook != nullptr) {
+        while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        (void)UnhookWindowsHookEx(KeyboardHook);
+        KeyboardHook = nullptr;
+    }
+    return 0;
+}
+
+auto StartNativeKeyboardHook() noexcept -> bool {
+    KeyboardTargetEditor.store(EditorWindow, std::memory_order_release);
+    KeyboardTargetHost.store(HostWindow, std::memory_order_release);
+    KeyboardTargetThreadId.store(HostWindowThreadId, std::memory_order_release);
+    KeyboardHookReadyEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (KeyboardHookReadyEvent == nullptr) {
+        KeyboardTargetEditor.store(nullptr, std::memory_order_release);
+        KeyboardTargetHost.store(nullptr, std::memory_order_release);
+        KeyboardTargetThreadId.store(0, std::memory_order_release);
+        return false;
+    }
+
+    KeyboardHookThreadHandle = CreateThread(nullptr, 0, NativeKeyboardHookThread, nullptr, 0,
+        &KeyboardHookThreadId);
+    if (KeyboardHookThreadHandle == nullptr) {
+        CloseHandle(KeyboardHookReadyEvent);
+        KeyboardHookReadyEvent = nullptr;
+        KeyboardTargetEditor.store(nullptr, std::memory_order_release);
+        KeyboardTargetHost.store(nullptr, std::memory_order_release);
+        KeyboardTargetThreadId.store(0, std::memory_order_release);
+        return false;
+    }
+
+    const DWORD ready = WaitForSingleObject(KeyboardHookReadyEvent, INFINITE);
+    CloseHandle(KeyboardHookReadyEvent);
+    KeyboardHookReadyEvent = nullptr;
+    if (ready == WAIT_OBJECT_0 && KeyboardHook != nullptr) return true;
+
+    if (KeyboardHookThreadId != 0) (void)PostThreadMessageW(KeyboardHookThreadId, WM_QUIT, 0, 0);
+    (void)WaitForSingleObject(KeyboardHookThreadHandle, INFINITE);
+    CloseHandle(KeyboardHookThreadHandle);
+    KeyboardHookThreadHandle = nullptr;
+    KeyboardHookThreadId = 0;
+    KeyboardTargetEditor.store(nullptr, std::memory_order_release);
+    KeyboardTargetHost.store(nullptr, std::memory_order_release);
+    KeyboardTargetThreadId.store(0, std::memory_order_release);
+    ForwardedKeyDown.fill(0);
+    return false;
+}
+
+void StopNativeKeyboardHook() noexcept {
+    KeyboardTargetEditor.store(nullptr, std::memory_order_release);
+    KeyboardTargetHost.store(nullptr, std::memory_order_release);
+    KeyboardTargetThreadId.store(0, std::memory_order_release);
+    if (KeyboardHookThreadId != 0) (void)PostThreadMessageW(KeyboardHookThreadId, WM_QUIT, 0, 0);
+    if (KeyboardHookThreadHandle != nullptr) {
+        (void)WaitForSingleObject(KeyboardHookThreadHandle, INFINITE);
+        CloseHandle(KeyboardHookThreadHandle);
+    }
+    KeyboardHookThreadHandle = nullptr;
+    KeyboardHookThreadId = 0;
+    KeyboardHook = nullptr;
+    ForwardedKeyDown.fill(0);
 }
 
 LRESULT CALLBACK OverlayWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) noexcept {
@@ -952,10 +1711,14 @@ auto CreateNativeEditor() noexcept -> bool {
         return false;
     }
     EditorBackgroundBrush = CreateSolidBrush(RGB(12, 12, 12));
-    OverlayWindow = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+    OverlayWindow = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         L"STATIC", L"", WS_POPUP, 0, 0, 1, 1, HostWindow, nullptr,
         GetModuleHandleW(nullptr), nullptr);
-    if (OverlayWindow == nullptr) {
+    if (OverlayWindow == nullptr || !SetLayeredWindowAttributes(OverlayWindow, 0, 0, LWA_ALPHA)) {
+        if (OverlayWindow != nullptr) {
+            (void)DestroyWindow(OverlayWindow);
+            OverlayWindow = nullptr;
+        }
         (void)SetWindowLongPtrW(HostWindow, GWLP_WNDPROC,
             reinterpret_cast<LONG_PTR>(PreviousHostWindowProc));
         PreviousHostWindowProc = nullptr;
@@ -1026,7 +1789,7 @@ auto CreateNativeEditor() noexcept -> bool {
     (void)SendMessageW(EditorWindow, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELONG(8, 8));
     (void)SetTimer(EditorWindow, EditorTimerId, 250, nullptr);
     MessageHook = SetWindowsHookExW(WH_GETMESSAGE, NativeMessageHook, nullptr, HostWindowThreadId);
-    KeyboardHook = SetWindowsHookExW(WH_KEYBOARD, NativeKeyboardHook, nullptr, HostWindowThreadId);
+    const bool keyboardHookInstalled = StartNativeKeyboardHook();
     PositionNativeEditor();
     LoadPageIntoEditor(CurrentPage);
     RECT overlayRect{};
@@ -1036,11 +1799,15 @@ auto CreateNativeEditor() noexcept -> bool {
         overlayRect.right - overlayRect.left, overlayRect.bottom - overlayRect.top,
         static_cast<unsigned long>(HostWindowThreadId), CurrentPage,
         Pages[CurrentPage - 1].text.size(), MessageHook != nullptr ? 1 : 0,
-        KeyboardHook != nullptr ? 1 : 0);
+        keyboardHookInstalled ? 1 : 0);
+    if (!keyboardHookInstalled && Context != nullptr) {
+        Context->LogWarn("SharedStashPageText: could not install the native low-level keyboard hook; note typing will be unavailable.");
+    }
     return true;
 }
 
 void DestroyNativeEditor() noexcept {
+    StopNativeKeyboardHook();
     if (EditorWindow != nullptr && IsWindow(EditorWindow)) {
         SavePageInput();
         (void)KillTimer(EditorWindow, EditorTimerId);
@@ -1060,9 +1827,7 @@ void DestroyNativeEditor() noexcept {
         else (void)PostMessageW(OverlayWindow, WM_CLOSE, 0, 0);
     }
     if (MessageHook != nullptr) (void)UnhookWindowsHookEx(MessageHook);
-    if (KeyboardHook != nullptr) (void)UnhookWindowsHookEx(KeyboardHook);
     MessageHook = nullptr;
-    KeyboardHook = nullptr;
     if (HostWindow != nullptr && IsWindow(HostWindow) && PreviousHostWindowProc != nullptr
             && reinterpret_cast<WNDPROC>(GetWindowLongPtrW(HostWindow, GWLP_WNDPROC)) == HostWindowProc) {
         (void)SetWindowLongPtrW(HostWindow, GWLP_WNDPROC,
@@ -1113,17 +1878,32 @@ void SyncPanelUi(const D2RL::PluginContext*, void*) noexcept {
     const bool newGame = NewGamePending.exchange(false, std::memory_order_acq_rel);
     const StashState state = ReadStashState();
     const bool pageKnown = !state.shared || state.page != 0;
-    const std::size_t page = state.shared && pageKnown
-        ? state.page : (newGame ? 1 : CurrentPage);
-    const bool stateChanged = newGame || StashOpen != state.open
-        || SharedTabSelected != state.shared || CurrentPage != page;
-    if (stateChanged) {
-        SavePageInput();
-        StashOpen = state.open;
-        SharedTabSelected = state.shared;
-        CurrentPage = page;
-        (void)PersistConfig();
+    std::size_t page{};
+    bool stateChanged{};
+    {
+        std::lock_guard lock(RenderSnapshotMutex);
+        page = state.shared && pageKnown
+            ? state.page : (newGame ? 1 : CurrentPage);
+        stateChanged = newGame || StashOpen != state.open
+            || SharedTabSelected != state.shared || CurrentPage != page;
     }
+    if (stateChanged) SavePageInput();
+
+    bool stashOpen{};
+    bool sharedTabSelected{};
+    std::size_t currentPage{};
+    {
+        std::lock_guard lock(RenderSnapshotMutex);
+        if (stateChanged) {
+            StashOpen = state.open;
+            SharedTabSelected = state.shared;
+            CurrentPage = page;
+        }
+        stashOpen = StashOpen;
+        sharedTabSelected = SharedTabSelected;
+        currentPage = CurrentPage;
+    }
+    if (stateChanged) (void)PersistConfig();
 
     bool panelOpen{};
     D2RL::Panels::PanelInfo info{.structSize = D2RL::Panels::PanelInfoSize};
@@ -1131,12 +1911,13 @@ void SyncPanelUi(const D2RL::PluginContext*, void*) noexcept {
     if (infoResult == D2RL::Panels::Result::Success) {
         panelOpen = info.presentationState == D2RL::Panels::PresentationState::Open;
     }
-    const bool shouldOpen = StashOpen && SharedTabSelected && pageKnown
-        && CurrentPage >= 1 && CurrentPage <= ConfiguredPageCount;
+    const bool shouldOpen = stashOpen && sharedTabSelected && pageKnown
+        && currentPage >= 1 && currentPage <= ConfiguredPageCount;
+    PageNoteRenderEnabled.store(shouldOpen, std::memory_order_release);
     const bool presentationChanged = shouldOpen != panelOpen;
     if (stateChanged) D2RL::LogInfoF(Context,
         "SharedStashPageText: panel sync stash=%d shared=%d page=%zu desired=%d open=%d infoResult=%u presentation=%u",
-        StashOpen ? 1 : 0, SharedTabSelected ? 1 : 0, CurrentPage,
+        stashOpen ? 1 : 0, sharedTabSelected ? 1 : 0, currentPage,
         shouldOpen ? 1 : 0, panelOpen ? 1 : 0,
         static_cast<unsigned>(infoResult), static_cast<unsigned>(info.presentationState));
     if (shouldOpen && !panelOpen) {
@@ -1217,28 +1998,28 @@ void __cdecl OnGameJoined(const D2RL::PluginContext* context,
     ScheduleSync();
 }
 auto RegisterServices(const D2RL::PluginContext* context) -> bool {
-    if (context->QueryService(D2RL::ServiceId::Thread, D2RL::ThreadServiceV1Version, &ThreadService)
+    if (context->QueryService(&ThreadService)
             != D2RL::ServiceQueryResult::Success
-            || ThreadService == nullptr || ThreadService->serviceSize < D2RL::ThreadServiceV1RequiredSize
+            || ThreadService == nullptr || ThreadService->serviceSize < D2RL::ThreadServiceRequiredSize
             || ThreadService->runOnUiThread == nullptr) return false;
-    if (context->QueryService(D2RL::ServiceId::Resource, D2RL::ResourceServiceV1Version, &ResourceService)
+    if (context->QueryService(&ResourceService)
             != D2RL::ServiceQueryResult::Success
-            || ResourceService == nullptr || ResourceService->serviceSize < D2RL::ResourceServiceV1RequiredSize
+            || ResourceService == nullptr || ResourceService->serviceSize < D2RL::ResourceServiceRequiredSize
             || ResourceService->registerResource == nullptr || ResourceService->unregisterResource == nullptr) return false;
-    if (context->QueryService(D2RL::ServiceId::Panel, D2RL::PanelServiceV1Version, &PanelService)
+    if (context->QueryService(&PanelService)
             != D2RL::ServiceQueryResult::Success
-            || PanelService == nullptr || PanelService->serviceSize < D2RL::PanelServiceV1RequiredSize
+            || PanelService == nullptr || PanelService->serviceSize < D2RL::PanelServiceRequiredSize
             || PanelService->registerPanel == nullptr || PanelService->unregisterPanel == nullptr
             || PanelService->getPanelInfo == nullptr || PanelService->openPanel == nullptr
             || PanelService->closePanel == nullptr) return false;
-    if (context->QueryService(D2RL::ServiceId::SharedEvent, D2RL::SharedEventServiceV1Version, &EventService)
+    if (context->QueryService(&EventService)
             != D2RL::ServiceQueryResult::Success
-            || EventService == nullptr || EventService->serviceSize < D2RL::SharedEventServiceV1RequiredSize
+            || EventService == nullptr || EventService->serviceSize < D2RL::SharedEventServiceRequiredSize
             || EventService->registerUiMessageListener == nullptr
             || EventService->unregisterUiMessageListener == nullptr) return false;
-    if (context->QueryService(D2RL::ServiceId::Lifecycle, D2RL::LifecycleServiceV1Version, &LifecycleService)
+    if (context->QueryService(&LifecycleService)
             != D2RL::ServiceQueryResult::Success
-            || LifecycleService == nullptr || LifecycleService->serviceSize < D2RL::LifecycleServiceV1RequiredSize
+            || LifecycleService == nullptr || LifecycleService->serviceSize < D2RL::LifecycleServiceRequiredSize
             || LifecycleService->registerGameplayEventListener == nullptr
             || LifecycleService->unregisterGameplayEventListener == nullptr) return false;
     return true;
@@ -1292,12 +2073,14 @@ auto InitializePlugin(const D2RL::PluginContext* context) -> bool {
     if (LifecycleService->registerGameplayEventListener(context, &gameJoinedListener, &GameJoinedHandle)
             != D2RL::Lifecycle::Result::Success
             || GameJoinedHandle == D2RL::Lifecycle::InvalidHandle) return false;
+    if (!InitializeNativeRenderer()) return false;
     Active.store(true, std::memory_order_release);
     return true;
 }
 
 void Shutdown() noexcept {
     Active.store(false, std::memory_order_release);
+    PageNoteRenderEnabled.store(false, std::memory_order_release);
     SavePageInput();
     DestroyNativeEditor();
     UnloadConfiguredFont();
@@ -1323,9 +2106,12 @@ void Shutdown() noexcept {
     ResourceService = nullptr;
     ThreadService = nullptr;
     LayoutJson.clear();
-    SharedTabSelected = false;
-    StashOpen = false;
-    CurrentPage = 1;
+    {
+        std::lock_guard lock(RenderSnapshotMutex);
+        SharedTabSelected = false;
+        StashOpen = false;
+        CurrentPage = 1;
+    }
     NewGamePending.store(false, std::memory_order_release);
     SyncPending.store(false, std::memory_order_release);
 }
@@ -1338,7 +2124,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderGetPluginInfo() noexcept -> const D2RL::PluginI
 
 D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) noexcept -> bool {
     Shutdown();
-    if (!D2RL::HasContext(context) || context->apiVersion != D2RL_PLUGIN_API_VERSION) return false;
+    if (!D2RL::HasContext(context) || context->abiVersion != D2RL_PLUGIN_ABI_VERSION) return false;
     Context = context;
     bool initialized{};
     try {
@@ -1352,7 +2138,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
         Context = nullptr;
         return false;
     }
-    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.24 is ready; font=%s size=%d source=%s.",
+    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.38 is ready; font=%s size=%d source=%s.",
         FontFamily.c_str(), FontSize, LoadedGameFontPath.empty() ? "Windows" : "D2R assets");
     return true;
 }

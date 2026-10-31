@@ -7,14 +7,14 @@
 config_version = 1
 page_count = 1000
 current_page = 1
-shared_tab_selected = true
+shared_tab_selected = false
 
 window_x = 604
 window_y = 20
 window_width = 226
 window_height = 38
 font = "exocet"
-font_size = 38
+font_size = 23
 anchor_x = 0.000
 anchor_y = 0.000
 
@@ -4026,4 +4026,3 @@ color = "#F0F0F0"
 [pages.1000]
 text = ""
 color = "#F0F0F0"
-
