@@ -2,6 +2,10 @@
 
 Shared Stash Page Text is a D2RLoader plugin that displays an editable, colored note above the Shared stash page indicator. It supports up to 1,000 pages and hides the note when another stash tab is selected.
 
+## Release 0.1.39
+
+This release corrects the published DLL build: it is compiled as x64 Release and statically links the MSVC runtime. It does not require Visual C++ debug runtime DLLs. Existing TOML files and notes remain compatible.
+
 ## Using notes
 
 Click the note and type. Press **Enter** or click outside the field to save. Each page has its own note and color, saved in `d2rloader/config/shared-stash-page-text.toml`.
@@ -62,6 +66,7 @@ cmake --build build --config Release --target shared_stash_page_text
 ```
 
 The DLL is `build/Release/d2rl-shared-stash-page-text.dll`.
+The target uses the static MSVC runtime for Release builds (`/MT`). Build with `--config Release`; do not distribute a DLL from the Debug output folder.
 
 ## Acknowledgements
 
