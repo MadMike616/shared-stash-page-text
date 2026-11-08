@@ -123,7 +123,7 @@ constexpr D2RL::PluginInfo Info{
     .abiVersion = D2RL_PLUGIN_ABI_VERSION,
     .id = PluginId,
     .name = "Shared Stash Page Text",
-    .version = "0.1.38",
+    .version = "0.1.39",
     .author = "MadMike",
     .description = "Editable colored notes for Shared stash pages.",
     .flags = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
