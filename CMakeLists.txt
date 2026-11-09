@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.29)
 
-project(SharedStashPageText VERSION 0.1.39 LANGUAGES CXX RC)
+project(SharedStashPageText VERSION 0.1.40 LANGUAGES CXX RC)
 
 include(FetchContent)
 

@@ -123,7 +123,7 @@ constexpr D2RL::PluginInfo Info{
     .abiVersion = D2RL_PLUGIN_ABI_VERSION,
     .id = PluginId,
     .name = "Shared Stash Page Text",
-    .version = "0.1.39",
+    .version = "0.1.40",
     .author = "MadMike",
     .description = "Editable colored notes for Shared stash pages.",
     .flags = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
@@ -153,6 +153,7 @@ std::atomic_bool NewGamePending{};
 std::atomic_bool SyncPending{};
 std::atomic_bool Active{};
 std::atomic_bool PageNoteRenderEnabled{};
+std::atomic_bool NativeRendererInitAttempted{};
 
 HWND HostWindow{};
 HWND OverlayWindow{};
@@ -1331,7 +1332,7 @@ auto InitializeNativeRenderer() noexcept -> bool {
             static_cast<std::uint32_t>(sizeof(DrawStyledTextBytes)),
             &NativeDrawStyledText, &OriginalDrawStyledText)
             && OriginalDrawStyledText != nullptr) {
-        Context->LogInfo("SharedStashPageText: DrawStyledText hook registered; notes render after the Shared page label.");
+        Context->LogInfo("SharedStashPageText: DrawStyledText hook registered after stash UI initialization; notes render after the Shared page label.");
         return true;
     }
     OriginalDrawStyledText = nullptr;
@@ -1875,6 +1876,11 @@ void SyncPanelUi(const D2RL::PluginContext*, void*) noexcept {
     if (!Active.load(std::memory_order_acquire) || Context == nullptr
             || PanelService == nullptr || PanelHandle == D2RL::Panels::InvalidHandle) return;
 
+    if (!NativeRendererInitAttempted.exchange(true, std::memory_order_acq_rel)) {
+        if (!InitializeNativeRenderer()) {
+            Context->LogError("SharedStashPageText: deferred native renderer initialization failed.");
+        }
+    }
     const bool newGame = NewGamePending.exchange(false, std::memory_order_acq_rel);
     const StashState state = ReadStashState();
     const bool pageKnown = !state.shared || state.page != 0;
@@ -2073,13 +2079,14 @@ auto InitializePlugin(const D2RL::PluginContext* context) -> bool {
     if (LifecycleService->registerGameplayEventListener(context, &gameJoinedListener, &GameJoinedHandle)
             != D2RL::Lifecycle::Result::Success
             || GameJoinedHandle == D2RL::Lifecycle::InvalidHandle) return false;
-    if (!InitializeNativeRenderer()) return false;
+    Context->LogInfo("SharedStashPageText: deferring the native draw hook until the stash UI is loaded.");
     Active.store(true, std::memory_order_release);
     return true;
 }
 
 void Shutdown() noexcept {
     Active.store(false, std::memory_order_release);
+    NativeRendererInitAttempted.store(false, std::memory_order_release);
     PageNoteRenderEnabled.store(false, std::memory_order_release);
     SavePageInput();
     DestroyNativeEditor();
@@ -2138,7 +2145,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
         Context = nullptr;
         return false;
     }
-    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.38 is ready; font=%s size=%d source=%s.",
+    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.40 is ready; font=%s size=%d source=%s.",
         FontFamily.c_str(), FontSize, LoadedGameFontPath.empty() ? "Windows" : "D2R assets");
     return true;
 }

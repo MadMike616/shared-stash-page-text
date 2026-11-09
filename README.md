@@ -2,6 +2,15 @@
 
 Shared Stash Page Text is a D2RLoader plugin that displays an editable, colored note above the Shared stash page indicator. It supports up to 1,000 pages and hides the note when another stash tab is selected.
 
+## Release 0.1.40
+
+- The native `DrawStyledText` hook now waits until the stash UI has loaded. This lets Pyre Stash Search validate and install its `BankPanel::Draw` hook first. Both plugins were confirmed working together with Pyre Stash Search 1.3.1+rev.1.
+- Existing TOML files and saved notes remain compatible; no configuration changes are required.
+- Built for Windows x64 as a Release DLL with the MSVC runtime linked statically. Compatibility remains D2RLoader PluginSDK 0.4.0 / Plugin ABI 4.
+- Thanks to PyreFly for the StashSearch reference and insight that helped diagnose the hook-order conflict.
+
+SHA-256: `83BCC0C53B5DD27C26EABFE1AE5218DBE170E190896F536A66F7BFF810BD0A2C`
+
 ## Release 0.1.39
 
 This release corrects the published DLL build: it is compiled as x64 Release and statically links the MSVC runtime. It does not require Visual C++ debug runtime DLLs. Existing TOML files and notes remain compatible.
