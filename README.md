@@ -1,5 +1,7 @@
 # Shared Stash Page Text
 
+Current release: 1.1.40. Updated loader SDK compatibility while preserving shared-stash notes, colors, and settings.
+
 Shared Stash Page Text is a D2RLoader plugin that displays an editable, colored note above the Shared stash page indicator. It supports up to 1,000 pages and hides the note when another stash tab is selected.
 
 ## Release 0.1.40

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.29)
 
-project(SharedStashPageText VERSION 0.1.40 LANGUAGES CXX RC)
+project(SharedStashPageText VERSION 1.1.40 LANGUAGES CXX RC)
 
 include(FetchContent)
 
@@ -9,7 +9,7 @@ set(D2RLPLUGIN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     D2RLoaderPluginSDK
     GIT_REPOSITORY https://github.com/D2RLoader/PluginSDK.git
-    GIT_TAG 6eb8f8b6192868214706bd6d528c5294f2f551b7
+    GIT_TAG 03a5af9e0feb3f95f95e148e330e01f6635950df
     GIT_PROGRESS TRUE
 )
 FetchContent_MakeAvailable(D2RLoaderPluginSDK)

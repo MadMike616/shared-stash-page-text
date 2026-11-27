@@ -123,7 +123,7 @@ constexpr D2RL::PluginInfo Info{
     .abiVersion = D2RL_PLUGIN_ABI_VERSION,
     .id = PluginId,
     .name = "Shared Stash Page Text",
-    .version = "0.1.40",
+    .version = "1.1.40",
     .author = "MadMike",
     .description = "Editable colored notes for Shared stash pages.",
     .flags = D2RL::PluginFlags::Client | D2RL::PluginFlags::NativeHooks,
@@ -2145,7 +2145,7 @@ D2RL_PLUGIN_EXPORT auto D2RLoaderLoadPlugin(const D2RL::PluginContext* context) 
         Context = nullptr;
         return false;
     }
-    D2RL::LogInfoF(Context, "Shared Stash Page Text 0.1.40 is ready; font=%s size=%d source=%s.",
+    D2RL::LogInfoF(Context, "Shared Stash Page Text 1.1.40 is ready; font=%s size=%d source=%s.",
         FontFamily.c_str(), FontSize, LoadedGameFontPath.empty() ? "Windows" : "D2R assets");
     return true;
 }

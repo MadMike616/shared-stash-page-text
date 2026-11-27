@@ -6,16 +6,16 @@
 |---|---|
 | Plugin name | Shared Stash Page Text |
 | Plugin ID | shared-stash-page-text |
-| Release version | 0.1.40 |
-| Inventory updated | 2026-11-09 |
-| Source revision | Release tag V0.1.40 |
+| Release version | 1.1.40 |
+| Inventory updated | 2026-11-27 |
+| Source revision | v1.1.40 release source |
 | D2R build(s) audited | Not validated during this source audit |
 | D2RLoader SDK / Plugin ABI | PluginSDK 0.4.0 / Plugin ABI 4 |
 | Audit status | Complete |
 
 ## Scope and method
 
-Inspected `src/plugin.cpp`, `src/plugin.rc`, `CMakeLists.txt`, and `README.md` in the v0.1.40 release source. Counted the plugin's native inline hook installation sites and Win32 window-procedure and input/message hooks. Calls to native stash and text helpers are not hook sites. The native renderer initialization is deferred until the first stash UI sync, allowing other plugins to validate their native targets before this plugin installs its preferred `DrawStyledText` hook. `BankPanel::Draw` remains a fallback only.
+Inspected `src/plugin.cpp`, `src/plugin.rc`, `CMakeLists.txt`, and `README.md` in the v1.1.40 release source. Counted the plugin's native inline hook installation sites and Win32 window-procedure and input/message hooks. Calls to native stash and text helpers are not hook sites. The native renderer initialization is deferred until the first stash UI sync, allowing other plugins to validate their native targets before this plugin installs its preferred `DrawStyledText` hook. `BankPanel::Draw` remains a fallback only.
 
 Numeric native addresses are RVAs. `InitializeNativeRenderer` validates expected instruction bytes before installing either native hook. The `DrawStyledText` hook is also gated on expected bytes for the widget, text measurement, style, and filled-rectangle helpers. Win32 hooks are installed only while the native editor is initialized and are removed or restored during teardown.
 
@@ -41,4 +41,6 @@ Numeric native addresses are RVAs. `InitializeNativeRenderer` validates expected
 
 ## Audit notes
 
-This is a source-level hook inventory; the D2R build and live hook installation were not independently validated as part of this source audit. Hook targets are unchanged from v0.1.39; v0.1.40 defers renderer hook installation until the stash UI has loaded. User testing confirmed coexistence with Pyre Stash Search 1.3.1+rev.1.
+This is a source-level hook inventory; the D2R build and live hook installation were not independently validated as part of this source audit. Hook targets are unchanged from v0.1.39; v1.1.40 defers renderer hook installation until the stash UI has loaded. User testing confirmed coexistence with Pyre Stash Search 1.3.1+rev.1.
+
+Release 1.1.40 review: no native hook, patch, vtable, or OS input/message hook targets changed. Existing validation limits remain applicable.
