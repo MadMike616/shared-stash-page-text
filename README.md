@@ -15,6 +15,10 @@ SHA-256: `83BCC0C53B5DD27C26EABFE1AE5218DBE170E190896F536A66F7BFF810BD0A2C`
 
 This release corrects the published DLL build: it is compiled as x64 Release and statically links the MSVC runtime. It does not require Visual C++ debug runtime DLLs. Existing TOML files and notes remain compatible.
 
+## Install
+
+Download the DLL and `SHA256SUMS.txt` from the same release, verify the checksum, and copy `d2rl-shared-stash-page-text.dll` to the mod's `d2rloader/plugins/` folder. First launch creates `d2rloader/config/shared-stash-page-text.toml` automatically. Keep an existing TOML when updating to preserve saved notes, colors, and settings.
+
 ## Using notes
 
 Click the note and type. Press **Enter** or click outside the field to save. Each page has its own note and color, saved in `d2rloader/config/shared-stash-page-text.toml`.
